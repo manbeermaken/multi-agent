@@ -1,30 +1,9 @@
 import os
 import subprocess
-import uuid
-from dotenv import load_dotenv
+from langgraph.types import interrupt
+from state import State, IntentClassifier
+from config import llm, vector_store
 
-from langchain.chat_models import init_chat_model
-from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_core.vectorstores import InMemoryVectorStore
-
-from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt, Command
-from langgraph.checkpoint.memory import MemorySaver
-
-from state import State,IntentClassifier
-
-load_dotenv()
-
-llm = init_chat_model(model="google_genai:gemini-3.5-flash-lite")
-
-knowledge = [
-    "LangChain is a toolkit for building LLM applications.",
-    "LangGraph is meant for agent orchestration and durable processes."
-]
-embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004")
-vector_store = InMemoryVectorStore(embeddings)
-vector_store.add_documents(documents=[Document(page_content=text) for text in knowledge])
 
 def classify_intent(state: State):
     """Classifies the user's intent to route to the correct agent."""
@@ -103,72 +82,3 @@ def prompt_llm_code(state: State):
         output = "Error: Claude CLI not found on this system. (Make sure Claude Code is installed)"
         
     return {"messages": [{"role": "assistant", "content": output}]}
-
-graph_builder = StateGraph(State)
-
-graph_builder.add_node("classifier", classify_intent)
-graph_builder.add_node("chat_agent", prompt_llm_chat)
-graph_builder.add_node("rag_agent", prompt_llm_rag)
-graph_builder.add_node("prepare_coding_request", prepare_coding_request)
-graph_builder.add_node("accept_coding", accept_coding)
-graph_builder.add_node("coding_agent", prompt_llm_code)
-
-graph_builder.add_edge(START, "classifier")
-
-graph_builder.add_conditional_edges(
-    "classifier",
-    lambda state: state.get("message_intent"),
-    {
-        "chat": "chat_agent",
-        "knowledge": "rag_agent",
-        "code": "prepare_coding_request"
-    }
-)
-
-graph_builder.add_edge("prepare_coding_request", "accept_coding")
-
-graph_builder.add_conditional_edges(
-    "accept_coding",
-    lambda state: state.get("next_node"),
-    {
-        "denied": END,
-        "coding_agent": "coding_agent",
-        "prepare_coding_request": "prepare_coding_request"
-    }
-)
-
-
-graph_builder.add_edge("chat_agent", END)
-graph_builder.add_edge("rag_agent", END)
-graph_builder.add_edge("coding_agent", END)
-
-checkpointer = MemorySaver()
-graph = graph_builder.compile(checkpointer=checkpointer)
-
-if __name__ == "__main__":
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    
-    print("LangGraph Multi-Agent Workflow Started (type 'quit' to exit)")
-    
-    while True:
-        try:
-            user_msg = input("\nEnter message: ")
-            if user_msg.lower() in ['quit', 'exit']:
-                break
-                
-            state_input = {"messages": [{"role": "user", "content": user_msg}]}
-            result = graph.invoke(state_input, config=config)
-            
-            while "__interrupt__" in result:
-                prompt_text = result["__interrupt__"][0].value
-                decision = input(f"\n[INTERRUPT] {prompt_text}\n> ")
-                
-                result = graph.invoke(Command(resume=decision), config=config)
-                
-            print("\nAssistant:", result["messages"][-1].content)
-            
-        except KeyboardInterrupt:
-            print("\nExiting...")
-            break
-        except Exception as e:
-            print(f"An error occurred: {e}")
